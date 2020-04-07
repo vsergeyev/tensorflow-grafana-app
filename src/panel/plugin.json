@@ -1,0 +1,11 @@
+{
+  "type": "panel",
+  "name": "TensorFlow Graph",
+  "id": "tensorflow-graph-panel",
+  "info": {
+    "logos": {
+      "small": "../grafana-tensorflow-app/img/logo.png",
+      "large": "../grafana-tensorflow-app/img/logo.png"
+    }
+  }
+}

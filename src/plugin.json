@@ -1,0 +1,33 @@
+{
+  "type": "app",
+  "name": "TensorFlow application",
+  "id": "grafana-tensorflow-app",
+
+  "info": {
+    "description": "TensorFlow graph panel for Grafana to create and train Machine Learning models",
+    "author": {
+      "name": "Volodymyr Sergeyev"
+    },
+    "keywords": ["TensorFlow", "ML", "AI", "model"],
+    "logos": {
+      "small": "img/logo.png",
+      "large": "img/logo.png"
+    },
+    "links": [
+      {"name": "Website", "url": "https://github.com/vsergeyev/tensorflow-grafana-app"},
+      {"name": "License", "url": "https://github.com/vsergeyev/tensorflow-grafana-app/blob/master/LICENSE"}
+    ],
+    "screenshots": [],
+    "version": "1.0.0",
+    "updated": "04/07/2020"
+  },
+
+  "includes": [
+    { "type": "panel", "name": "TensorFlow Graph Panel" }
+  ],
+
+  "dependencies": {
+    "grafanaVersion": "6.3.x",
+    "plugins": []
+  }
+}
