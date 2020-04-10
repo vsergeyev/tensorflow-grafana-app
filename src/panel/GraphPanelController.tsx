@@ -113,6 +113,36 @@ function _trainModel(model: any, source: any) {
     console.log('Done Training', result);
     appEvents.emit(AppEvents.alertSuccess, ['Training complete']);
   });
+
+  return tensorData;
+}
+
+function _forecastModel(model: any) {
+  console.log(model);
+  const { vae, tensorData } = model;
+  console.log('VAE', vae);
+  console.log('Tensor data', tensorData);
+
+  const {inputMax, inputMin, labelMin, labelMax} = tensorData;
+
+  const [preds] = tf.tidy(() => {
+    const xs = tf.linspace(0, 1, 100);
+    const preds = vae.predict(xs.reshape([100, 1]));
+
+    const unNormPreds = preds
+      .mul(labelMax.sub(labelMin))
+      .add(labelMin);
+
+    // Un-normalize the data
+    return [unNormPreds.dataSync()];
+  });
+
+
+  const predictedPoints = Array.from(preds).map((val, i) => {
+    return {y: val}
+  });
+
+  return predictedPoints;
 }
 
 function _createAndTrainModel(source: any) {
@@ -344,12 +374,12 @@ function _createAndTrainModel(source: any) {
   console.log('VAE', vae);
 
   // Train the model
-  _trainModel(vae, source);
+  const tensorData = _trainModel(vae, source);
 
   // TODO: In LoudML upper_* and lower_* calculated as +-3 standard deviation per prediacted value
   // fill between plot: http://www.jqplot.com/deploy/dist/examples/fillBetweenLines.html
 
-  return vae;
+  return { vae, tensorData };
 }
 
 // ---------------------------------------------------------------------------
@@ -618,14 +648,15 @@ export class MLModelController extends React.Component {
 
   trainModel() {
     if (this.props.panelOptions.model) {
-      _trainModel(this.props.panelOptions.model, this.props.data.series[0]);
+      _trainModel(this.props.panelOptions.model.vae, this.props.data.series[0]);
       this.props.onOptionsChange(this.props.panelOptions);
     }
   }
 
   forecastModel() {
     if (this.props.panelOptions.model) {
-      _forecastModel(this.props.panelOptions.model, this.props.data.series[0]);
+      const res = _forecastModel(this.props.panelOptions.model);
+      console.log(res);
       this.props.onOptionsChange(this.props.panelOptions);
     }
   }
