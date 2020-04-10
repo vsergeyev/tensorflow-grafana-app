@@ -1,6 +1,8 @@
 import React from 'react';
 import moment from 'moment'
 
+import * as tf from '@tensorflow/tfjs'
+
 import { GraphSeriesToggler, Button, Tooltip } from '@grafana/ui';
 import { PanelData, GraphSeriesXY, AbsoluteTimeRange, TimeZone, AppEvents } from '@grafana/data';
 import { getDataSourceSrv, getBackendSrv } from '@grafana/runtime';
@@ -28,6 +30,329 @@ import {
   extract_model_tags_map
 } from './extractors';
 
+// tf.enableDebugMode();
+
+// -- ML code ----------------------------------------------------------------
+function _convertToTensor(data) {
+  appEvents.emit(AppEvents.alertSuccess, ['Converting series data to Tensor']);
+
+  return tf.tidy(() => {
+    tf.util.shuffle(data);
+
+    const inputs = data.map(d => d.y)
+    const labels = data.map(d => d.x);
+
+    const inputTensor = tf.tensor2d(inputs, [inputs.length, 1]);
+    const labelTensor = tf.tensor2d(labels, [labels.length, 1]);
+
+    const inputMax = inputTensor.max();
+    const inputMin = inputTensor.min();
+    const labelMax = labelTensor.max();
+    const labelMin = labelTensor.min();
+
+    const normalizedInputs = inputTensor.sub(inputMin).div(inputMax.sub(inputMin));
+    const normalizedLabels = labelTensor.sub(labelMin).div(labelMax.sub(labelMin));
+
+    return {
+      inputs: normalizedInputs,
+      labels: normalizedLabels,
+      inputMax,
+      inputMin,
+      labelMax,
+      labelMin,
+    }
+  });
+}
+
+function _onBatchEnd(batch, logs) {
+    console.log('Accuracy', logs);
+    // appEvents.emit(AppEvents.alertSuccess, ['Training batch complete']);
+}
+
+async function _fitModel(model, inputs, labels) {
+  const LEARNING_RATE = 0.0001;
+  const optimizer = tf.train.adam(LEARNING_RATE);
+  model.compile({
+    optimizer: optimizer,
+    loss: tf.losses.meanSquaredError, // loss: 'categoricalCrossentropy',
+    metrics: ['mse'],
+  });
+
+  console.log('Model compiled', model);
+
+  const batchSize = 64;
+  const epochs = 10;
+
+  appEvents.emit(AppEvents.alertSuccess, ['Training model...']);
+
+  return await model.fit(inputs, labels, {
+    batchSize,
+    epochs,
+    shuffle: true,
+    validationSplit: 0.1,
+    callbacks: {_onBatchEnd}
+  });
+}
+
+function _trainModel(model: any, source: any) {
+  const timeData = source.fields[0].values.buffer;
+  const metricData = source.fields[1].values.buffer;
+
+  var data = timeData.map(function(timestamp, i) {
+    return {x: timestamp, y: metricData[i]};
+  });
+
+  console.log(data);
+
+  const tensorData = _convertToTensor(data);
+  let {inputs, labels} = tensorData;
+
+  // console.log(inputs.arraySync());
+
+  _fitModel(model, inputs, labels).then(result => {
+    console.log('Done Training', result);
+    appEvents.emit(AppEvents.alertSuccess, ['Training complete']);
+  });
+}
+
+function _createAndTrainModel(source: any) {
+  let input_shape = [1];
+  // let base_depth = [1];
+  // let encoded_size = 16;
+
+  // // VAE
+  // let encoder = tf.sequential({
+  //   name: 'vae_encoder',
+  //   layers: [
+  //     tf.layers.inputLayer({
+  //       inputShape: input_shape
+  //     }),
+  //     // tf.layers.Lambda(lambda x: tf.cast(x, tf.float32) - 0.5),
+  //     tf.layers.conv2d({
+  //       inputShape: base_depth,
+  //       filters: 5,
+  //       kernelSize: 1,
+  //       strides: 1,
+  //       padding: 'same',
+  //       activation: 'LeakyReLU',
+  //       kernelInitializer: 'varianceScaling'
+  //     }),
+  //     tf.layers.conv2d({
+  //       inputShape: base_depth,
+  //       filters: 5,
+  //       kernelSize: 1,
+  //       strides: 2,
+  //       padding: 'same',
+  //       activation: 'LeakyReLU',
+  //       kernelInitializer: 'varianceScaling'
+  //     }),
+  //     tf.layers.conv2d({
+  //       inputShape: 2 * base_depth,
+  //       filters: 5,
+  //       kernelSize: 1,
+  //       strides: 1,
+  //       padding: 'same',
+  //       activation: 'LeakyReLU',
+  //       kernelInitializer: 'varianceScaling'
+  //     }),
+  //     tf.layers.conv2d({
+  //       inputShape: 2 * base_depth,
+  //       filters: 5,
+  //       kernelSize: 1,
+  //       strides: 2,
+  //       padding: 'same',
+  //       activation: 'LeakyReLU',
+  //       kernelInitializer: 'varianceScaling'
+  //     }),
+  //     tf.layers.conv2d({
+  //       inputShape: 4* encoded_size,
+  //       filters: 7,
+  //       kernelSize: 1,
+  //       strides: 1,
+  //       padding: 'valid',
+  //       activation: 'LeakyReLU',
+  //       kernelInitializer: 'varianceScaling'
+  //     }),
+  //     tf.layers.flatten(),
+  //     tf.layers.dense({
+  //       inputShape: input_shape,
+  //       units: 1,
+  //       useBias: true
+  //     })
+  //     // tf.layers.dense(tfpl.MultivariateNormalTriL.params_size(encoded_size),
+  //     //            activation=None),
+  //     // tf.layers.MultivariateNormalTriL(
+  //     //     encoded_size,
+  //     //     activity_regularizer=tfpl.KLDivergenceRegularizer(prior, weight=1.0)),
+  //   ]
+  // });
+
+  // let decoder = tf.sequential({
+  //   name: 'vae_decoder',
+  //   layers: [
+  //     tf.layers.inputLayer({
+  //       inputShape: [encoded_size]
+  //     }),
+  //     tf.layers.reshape({
+  //       targetShape: [1, 1, encoded_size]
+  //     }),
+  //     tf.layers.conv2dTranspose({
+  //       inputShape: 2 * base_depth,
+  //       filters: 7,
+  //       kernelSize: 1,
+  //       strides: 1,
+  //       padding: 'valid',
+  //       activation: 'LeakyReLU',
+  //       kernelInitializer: 'varianceScaling'
+  //     }),
+  //     tf.layers.conv2dTranspose({
+  //       inputShape: 2 * base_depth,
+  //       filters: 5,
+  //       kernelSize: 1,
+  //       strides: 1,
+  //       padding: 'same',
+  //       activation: 'LeakyReLU',
+  //       kernelInitializer: 'varianceScaling'
+  //     }),
+  //     tf.layers.conv2dTranspose({
+  //       inputShape: 2 * base_depth,
+  //       filters: 5,
+  //       kernelSize: 1,
+  //       strides: 2,
+  //       padding: 'same',
+  //       activation: 'LeakyReLU',
+  //       kernelInitializer: 'varianceScaling'
+  //     }),
+  //     tf.layers.conv2dTranspose({
+  //       inputShape: base_depth,
+  //       filters: 5,
+  //       kernelSize: 1,
+  //       strides: 1,
+  //       padding: 'same',
+  //       activation: 'LeakyReLU',
+  //       kernelInitializer: 'varianceScaling'
+  //     }),
+  //     tf.layers.conv2dTranspose({
+  //       inputShape: base_depth,
+  //       filters: 5,
+  //       kernelSize: 1,
+  //       strides: 2,
+  //       padding: 'same',
+  //       activation: 'LeakyReLU',
+  //       kernelInitializer: 'varianceScaling'
+  //     }),
+  //     tf.layers.conv2dTranspose({
+  //       inputShape: base_depth,
+  //       filters: 5,
+  //       kernelSize: 1,
+  //       strides: 1,
+  //       padding: 'same',
+  //       activation: 'LeakyReLU',
+  //       kernelInitializer: 'varianceScaling'
+  //     }),
+  //     tf.layers.conv2d({
+  //       filters: 1, kernelSize: 5, strides: 1, padding: 'same'
+  //     }),
+  //     tf.layers.flatten(),
+  //     // tf.layers.IndependentBernoulli(input_shape, tf.layers.Bernoulli.logits),
+  //   ]
+  // });
+
+  let encoder = tf.sequential();
+  encoder.add(tf.layers.inputLayer({inputShape: input_shape}));
+  encoder.add(tf.layers.dense({units: 1, useBias: true, activation: 'relu'}));
+  encoder.add(tf.layers.dense({units: 1, useBias: true, activation: 'relu'}));
+  encoder.add(tf.layers.dense({units: 1, useBias: true}));
+  console.log('Encoder', encoder);
+
+  let decoder = tf.sequential();
+  decoder.add(tf.layers.inputLayer({inputShape: input_shape}));
+  decoder.add(tf.layers.dense({units: 1, useBias: true, activation: 'relu'}));
+  decoder.add(tf.layers.dense({units: 1, useBias: true, activation: 'relu'}));
+  decoder.add(tf.layers.dense({units: 1, useBias: true, activation: 'linear'}));
+  console.log('Decoder', decoder);
+
+  // let encoder = tf.sequential({
+  //   name: 'vae_encoder',
+  //   layers: [
+  //     tf.layers.inputLayer({
+  //       inputShape: input_shape
+  //     }),
+  //     tf.layers.dense({
+  //       units: 1,
+  //       // kernelInitializer: tf.regularizers.l2(), // {l2: 0.001}
+  //       useBias: true,
+  //       activation: 'relu'
+  //     }),
+  //     tf.layers.dense({
+  //       units: 1,
+  //       // kernelInitializer: tf.regularizers.l2(), // {l2: 0.001}
+  //       useBias: true,
+  //       activation: 'relu'
+  //     }),
+  //     tf.layers.dense({
+  //       units: 1,
+  //       useBias: true
+  //     })
+  //   ]
+  // });
+
+  // let decoder = tf.sequential({
+  //   name: 'vae_decoder',
+  //   layers: [
+  //     tf.layers.inputLayer({
+  //       inputShape: input_shape
+  //     }),
+  //     tf.layers.dense({
+  //       units: 1,
+  //       // kernelInitializer: tf.regularizers.l2(), // {l2: 0.001}
+  //       useBias: true,
+  //       activation: 'relu'
+  //     }),
+  //     tf.layers.dense({
+  //       units: 1,
+  //       // kernelInitializer: tf.regularizers.l2(), // {l2: 0.001}
+  //       useBias: true,
+  //       activation: 'relu'
+  //     }),
+  //     tf.layers.dense({
+  //       units: 1,
+  //       useBias: true,
+  //       activation: 'linear'
+  //     })
+  //   ]
+  // });
+
+  const vae = tf.sequential();
+  vae.add(tf.layers.dense({inputShape: [1], units: 1}));
+  // vae.add(tf.layers.inputLayer({
+  //   inputShape: [1],
+  // }));
+  // vae.add(tf.layers.reshape({targetShape: [1, 1, inputs.size]}));
+  // vae.add(tf.layers.lstm({units: 1}));
+  // vae.add(tf.layers.conv2d({filters: 5, kernelSize: 1, padding: 'same', activation: 'relu', kernelInitializer: 'randomUniform'}));
+  // vae.add(tf.layers.reshape({targetShape: [1]}));
+  // vae.add(tf.layers.flatten());
+  vae.add(tf.layers.dense({units: 1}));
+  // vae.add(tf.layers.dense({units: 1, useBias: true}));
+
+  // const vae = tf.model({
+  //   name: 'vae',
+  //   inputs: encoder.inputs,
+  //   outputs: decoder.apply(encoder.outputs[0])
+  // });
+  console.log('VAE', vae);
+
+  // Train the model
+  _trainModel(vae, source);
+
+  // TODO: In LoudML upper_* and lower_* calculated as +-3 standard deviation per prediacted value
+  // fill between plot: http://www.jqplot.com/deploy/dist/examples/fillBetweenLines.html
+
+  return vae;
+}
+
+// ---------------------------------------------------------------------------
 
 interface GraphPanelControllerAPI {
   series: GraphSeriesXY[];
@@ -173,41 +498,19 @@ export class GraphPanelController extends React.Component<GraphPanelControllerPr
 }
 
 export class LoudMLTooltip extends React.Component {
-  data: any;
-
   constructor(props: any) {
     super(props);
-    this.data = props.data;
+    window.console.log('LoudMLTooltip init', props);
   }
 
   render () {
     const feature = (
       (
-        this.data.request.targets
-        &&this.data.request.targets.length>0
-        &&extract_tooltip_feature(this.data.request.targets[0])
+        this.props.data.request.targets
+        &&this.props.data.request.targets.length>0
+        &&extract_tooltip_feature(this.props.data.request.targets[0])
       )
     )|| 'Select one field'
-
-    const interval = (
-      (
-        this.data.request.targets
-        &&this.data.request.targets.length>0
-        &&extract_group_by(this.data.request.targets[0])
-      )
-    )|| 'Select a \'Group by\' value'
-
-    const fill_value = (
-        this.data.request.targets
-        &&this.data.request.targets.length>0
-        &&extract_fill_value(this.data.request.targets[0])
-    )|| 'Select a \'Fill\' value'
-
-    // TODO: extractor for Tags
-    const tags_value = (
-        this.data.request.targets
-        &&extract_format_tags(this.data.request.targets[0])
-    )|| '(Optional) Select \'Tag(s)\' or WHERE statement'
 
     return (
       <div className='small'>
@@ -222,224 +525,46 @@ export class LoudMLTooltip extends React.Component {
           <br />
           <code>{feature}</code>
         </p>
-        <p>
-          <b>groupBy bucket interval:</b>
-          <br />
-          <code>{interval}</code>
-        </p>
-        <p>
-          <b>Match all:</b>
-          <br />
-          <code>{tags_value}</code>
-        </p>
-        <p>
-          <b>Fill value:</b>
-          <br />
-          <code>{fill_value}</code>
-        </p>
       </div>
     )
   }
 }
 
-export class CreateBaselineButton extends React.Component {
-  data: any;
-  dsName: string;
-  ds: LoudMLDatasource;
-  datasource: any;
-
+export class CreateBaselineButton extends React.Component<> {
   constructor(props: any) {
     super(props);
-    this.data = props.data;
-    this.ds = null;
-    this.dsName = null;
     window.console.log('CreateBaselineButton init', props);
   }
 
   componentDidUpdate(prevProps) {
-    this.data = this.props.data;
     // window.console.log('BaselineButton update', this.data);
   }
 
-  isValid() {
-    return (
-      this.data.request.targets
-      &&this.data.request.targets.length>0
-      &&extract_is_valid(this.data.request.targets[0])
-    )
-  }
-
-  normalizeInterval(bucketInterval: any) {
-    // interval = max(5, min(bucketIntervak, 60))
-    const regex = /(\d+)(.*)/
-    const interval = regex.exec(bucketInterval)
-    if (!interval) {
-        return MIN_INTERVAL_UNIT
-    }
-
-    const duration = moment.duration(parseInt(interval[1], 10), interval[2]).asSeconds()
-    if (!duration) {
-        return MIN_INTERVAL_UNIT
-    }
-
-    const normalized = Math.max(
-        MIN_INTERVAL_SECOND,
-        Math.min(
-            duration,
-            MAX_INTERVAL_SECOND
-        )
-    )
-    return `${normalized}s`
-  }
-
-  normalizeSpan(bucketInterval: any) {
-    // span = max(10, min(24h/bucketInterval, 100))
-    const regex = /(\d+)(.*)/
-    const interval = regex.exec(bucketInterval)
-    if (!interval) {
-        return MIN_SPAN
-    }
-
-    const duration = moment.duration(parseInt(interval[1], 10), interval[2]).asSeconds()
-    if (!duration) {
-        return MIN_SPAN
-    }
-
-    return Math.max(MIN_SPAN, Math.min(Math.ceil(86400/duration), MAX_SPAN))
-  }
-
-  _trainModel(name: string) {
-    const loudml = this.ds.loudml;
-
-    try {
-      loudml.trainModel(name, this.data).then(result => {
-        window.console.log("trainModel", result)
-        appEvents.emit(AppEvents.alertSuccess, ['Model train job started on Loud ML server']);
-      }).catch(err => {
-        window.console.log("trainModel error", err)
-        appEvents.emit(AppEvents.alertError, ['Model train job error', err.data.message]);
-        return
-      });
-    } catch (error) {
-      console.error(error)
-      appEvents.emit(AppEvents.alertError, ['Model train job error', err.message]);
-    }
-
-  }
-
-  _createAndTrainModel() {
-    const source = this.data.request.targets[0];
-    const fields = [source];
-    const loudml = this.ds.loudml;
-
-    this.getDatasource(source.datasource).then(result => {
-      this.datasource = result;
-      window.console.log("getDatasource", this.datasource);
-
-      // TODO: find a way to pass all this.datasource connection params to Loud ML server
-      // This will allow to auto create bucket to store ML Model training results
-
-      const bucket = this.props.panelOptions.datasourceOptions.input_bucket;
-      window.console.log("Input Bucket", bucket);
-
-      const name = [
-          extract_model_database(this.datasource),
-          extract_model_measurement(source),
-          extract_model_select(source),
-          extract_model_tags(source),
-          extract_model_time_format(source),
-      ].join('_').replace(/\./g, "_")
-
-      // window.console.log("New ML Model name", name)
-
-      // Group By Value – [{params: ["5m"], type: "time"}, {params: ["linear"], type: "fill"}]
-      // Let parse a "5m" time from it
-      const time = extract_model_time(source);
-      const model = {
-          ...DEFAULT_MODEL,
-          max_evals: 10,
-          name: name,
-          interval: this.normalizeInterval(time),
-          span: this.normalizeSpan(time),
-          default_bucket: bucket, //bucket.name - if we will use createAndGetBucket()
-          bucket_interval: time,
-          features: fields.map(
-              (field) => ({
-                      name: extract_model_select(field),
-                      measurement: extract_model_measurement(field),
-                      field: extract_model_feature(field),
-                      metric: extract_model_func(field), // aggregator, avg/mean
-                      io: 'io',
-                      default: extract_model_fill(source),
-                      match_all: extract_model_tags_map(field), // .tags && field.tags.map(
-                          // (tag) => ({
-                          //         tag: tag.key,
-                          //         value: tag.value,
-                          //     })
-                          // )) || [],
-                  })
-              ),
-      }
-
-      window.console.log("ML Model", model)
-      this.props.panelOptions.modelName = name;
-      this.props.onOptionsChange(this.props.panelOptions);
-
-      loudml.getModel(name).then(result => {
-        // Model already exists
-        // Let re-Train it on current dataframe
-        // window.console.log("getModel", result);
-        this.props.panelOptions.modelName = name;
-        this.props.onOptionsChange(this.props.panelOptions);
-        this._trainModel(name);
-
-      }).catch(err => {
-        // New Model
-        // Create, train
-        loudml.createModel(model).then(result => {
-          // window.console.log("createModel", result);
-          loudml.createModelHook(model.name, loudml.createHook(ANOMALY_HOOK, model.default_bucket)).then(result => {
-            // window.console.log("createModelHook", result);
-            // loudml.modelCreated(model)
-            appEvents.emit(AppEvents.alertSuccess, ['Model has been created on Loud ML server']);
-
-            this.props.panelOptions.modelName = name;
-            this.props.onOptionsChange(this.props.panelOptions);
-            this._trainModel(name);
-
-          }).catch(err => {
-            window.console.log("createModelHook error", err);
-            appEvents.emit(AppEvents.alertError, [err.message]);
-            return
-          });
-        }).catch(err => {
-          window.console.log("createModel error", err);
-          appEvents.emit(AppEvents.alertError, ["Model create error", err.data]);
-          return
-        });
-      });
-    }).catch(err => {
-      console.error(err);
-      appEvents.emit(AppEvents.alertError, [err.message]);
-      return
-    });
-  }
-
   onCreateBaselineClick() {
-    // window.console.log(this);
+    if (!this.props.data.series) {
+      appEvents.emit(AppEvents.alertError, ['Data Series missing. In Query settings please choose a metric']);
+      return
+    }
 
-    // TODO: check for data in series
-    // appEvents.emit(AppEvents.alertError, ['In Query settings please choose One metric; Group by != auto; Fill != linear']);
+    const source = this.props.data.request.targets[0];
+    const series= this.props.data.series[0];
 
-    this._createAndTrainModel();
+    this.props.panelOptions.modelName = [
+        extract_model_measurement(source),
+        extract_model_select(source),
+        extract_model_tags(source),
+        extract_model_time_format(source),
+    ].join('_').replace(/\./g, "_")
+    this.props.panelOptions.model = _createAndTrainModel(series);
+    this.props.onOptionsChange(this.props.panelOptions);
   }
 
   render () {
-    const data = this.data;
+    const data = this.props.data;
 
     return(
       <>
-      <Button size="sm" className="btn btn-inverse" disabled={!this.isValid()}
+      <Button size="sm" className="btn btn-inverse"
         onClick={this.onCreateBaselineClick.bind(this)}>
         <i className="fa fa-graduation-cap fa-fw"></i>
         Create TensorFlow Model
@@ -458,113 +583,59 @@ export class MLModelController extends React.Component {
   is_trained: boolean;
   is_running: boolean;
   model: any;
-  modelName: string;
-  dsName: string;
-  loudml: any;
 
   constructor(props: any) {
     super(props);
-    // window.console.log('MLModelController init', props);
+    window.console.log('MLModelController init', props);
   }
 
   componentDidUpdate(prevProps) {
-    // window.console.log('MLModelController update', this.props);
+    window.console.log('MLModelController update', this.props);
   }
 
   componentDidMount() {
-    this.intervalId = setInterval(this.getModel.bind(this), 15000);
+    // this.intervalId = setInterval(this.getModel.bind(this), 5000);
   }
 
   componentWillUnmount() {
-    clearInterval(this.intervalId);
+    // clearInterval(this.intervalId);
   }
 
   getModel() {
-    if (!this.loudml || this.props.panelOptions.modelName.length==0) {
+    if (!this.props.panelOptions.model) {
       return
     }
 
-    this.modelName = this.props.panelOptions.modelName;
-    // window.console.log("ML getModel", this.modelName);
+    this.model = this.props.panelOptions.model;
+    window.console.log("ML getModel", this.model);
 
     // TODO: Update buttons based on model state
   }
 
   toggleModelRun() {
-    if (this.model && this.model.settings && this.model.settings.run) {
-      this.loudml.stopModel(this.modelName).then(result => {
-        this.model.settings.run = false;
-        this.props.onOptionsChange(this.props.panelOptions);
-      });
-    } else {
-      this.loudml.startModel(this.modelName).then(result => {
-        this.model.settings.run = true;
-        this.props.onOptionsChange(this.props.panelOptions);
-      });
-    }
+    // TODO
   }
 
   trainModel() {
-    if (this.model) {
-      try {
-        this.loudml.trainModel(this.modelName, this.props.data).then(result => {
-          window.console.log("ML trainModel", result)
-          appEvents.emit(AppEvents.alertSuccess, ['Model train job started on Loud ML server']);
-        }).catch(err => {
-          window.console.log("ML trainModel error", err)
-          appEvents.emit(AppEvents.alertError, ['Model train job error', err.data.message]);
-          return
-        });
-      } catch (error) {
-        console.error(error)
-        appEvents.emit(AppEvents.alertError, ['Model train job error', err.message]);
-      }
+    if (this.props.panelOptions.model) {
+      _trainModel(this.props.panelOptions.model, this.props.data.series[0]);
+      this.props.onOptionsChange(this.props.panelOptions);
     }
   }
 
   forecastModel() {
-    if (this.model) {
-      try {
-        this.loudml.forecastModel(this.modelName, this.props.data).then(result => {
-          window.console.log("ML forecastModel", result)
-          appEvents.emit(AppEvents.alertSuccess, ['Model forecast job started on Loud ML server']);
-        }).catch(err => {
-          window.console.log("ML forecastModel error", err)
-          appEvents.emit(AppEvents.alertError, ['Model forecast job error', err.data.message]);
-          return
-        });
-      } catch (error) {
-        console.error(error)
-        appEvents.emit(AppEvents.alertError, ['Model forecast job error', err.message]);
-      }
+    if (this.props.panelOptions.model) {
+      _forecastModel(this.props.panelOptions.model, this.props.data.series[0]);
+      this.props.onOptionsChange(this.props.panelOptions);
     }
   }
 
   render () {
-    const play_btn = (
-      this.model
-      && this.model.settings
-      && this.model.settings.run
-      && <a href="#" onClick={this.toggleModelRun.bind(this)}> <i className="fa fa-pause"></i> Stop</a>
-    ) || <a href="#" onClick={this.toggleModelRun.bind(this)}> <i className="fa fa-play"></i> Play</a>;
-
-    let model_trained = (
-      this.model
-      && this.model.state
-      && this.model.state.trained
-      && "Trained."
-    ) || "Not trained.";
-
-    if (this.model && this.model.training && (this.model.training.state == "running")) {
-      model_trained = "Training...";
-    }
-
-    if (this.modelName) {
+    if (this.props.panelOptions.modelName) {
       return(
         <span className="panel-time-info">
-          ML Model: {this.modelName} <span className="label">{model_trained}</span>
-          {play_btn}
-          <a href="#" onClick={this.trainModel.bind(this)}> <i className="fa fa-clock-o"></i> Train</a>
+          ML Model: {this.props.panelOptions.modelName}
+          <a href="#" onClick={this.trainModel.bind(this)}> <i className="fa fa-clock-o"></i> Re-train</a>
           <a href="#" onClick={this.forecastModel.bind(this)}> <i className="fa fa-clock-o"></i> Forecast</a>
 
           <Tooltip placement="top" content="Current time range selection will be used to Train / Forecast">

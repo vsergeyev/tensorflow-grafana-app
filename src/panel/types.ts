@@ -49,6 +49,7 @@ export interface Options {
   tooltipOptions: GraphTooltipOptions;
   datasourceOptions: GraphDatasourceOptions;
   modelName?: string;
+  model: any;
 }
 
 export const defaults: Options = {
@@ -74,5 +75,6 @@ export const defaults: Options = {
     epochs: 10,
     batchsize: 64
   },
-  modelName: ''
+  modelName: '',
+  model: {}
 };

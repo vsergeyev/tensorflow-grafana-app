@@ -336,7 +336,7 @@ function _get_fill(value: any) {
 function _get_time(value: any) {
   const time = value.filter(o => o.type==='time');
   if (time.length !== 1) {
-    return 10m;
+    return "10m";
   }
   return time[0].params[0];
 }
